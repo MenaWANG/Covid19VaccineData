@@ -1,0 +1,725 @@
+---
+title: "Data Preparation for Modelling"
+author: "[Mena WANG](https://menawang.github.io/online-cv/)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 5
+    number_sections: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE,
+                      fig.width=9,
+                      fig.height=5.06,
+                      fig.align="center")
+
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(lubridate)
+library(imputeTS)
+library(zoo)
+library(scales)
+library(ggmap)
+library(ggthemes)
+library(visdat)
+library(gridExtra)
+library(grid)
+library(rworldmap)
+library(plotly)
+library(DT)
+
+
+
+```
+# Project Overview
+
+The purpose of this report is **to investigate the effects of vaccines on two key aspects of the pandemic**:  
+
+* a) slowing down the **spread** and 
+* b) reducing the **severity of illness** from Covid-19
+
+The analysis was done using the **many-models approach**, where the same model was estimated among each and every entity with data then summarized to gain a comprehensive picture of vaccine effectiveness worldwide. 
+
+**The full report is too big for GitHub to host, you can find it [here](https://rpubs.com/MenaWANG/COVID19Vaccines), or explore it through this [interactive dashboard](https://rstudioconnect-online.monash.edu/connect/#/apps/287/access).** Followed is the code used to prepare data for the many-models analysis. You can also download the prepared data from the **Data** folder. 
+
+Have fun wrangling and analyzing the data! Comments and suggestions highly appreciated, thanks!
+
+
+# Data Overview 
+
+One of the best COVID-19 datasets is the daily-updated Covid-19 dataset offered by [Our World in Data](https://ourworldindata.org/coronavirus). Still, some wrangling needs to be done before the data will be ready for modeling. 
+
+For those interested in the wrangling process, please read ahead; for those who simply want to use the prepared the data, here is a list of data you can find in the **Data Folder** 
+
+1. **VacccineAllVariables.csv**: Dataset with imputed vaccine numbers, smoothed case and deaths numbers, and a comprehensive list of other relevant variables.
+2. **Vaccine.RDS**: Dataset with only the key variables in RDS format, used in deploying [this Dashboard]((https://rstudioconnect-online.monash.edu/connect/#/apps/287/access)) to boost performance.
+3. **Entity.RDS**: List of all entities in the original dataset, categorized as included vs not-included in the analysis depending on its population. The population threshold is now set as 100K (i.e., only entities with population larger than 100K are included), you can adjust the value in the following code chunk, the above two data files will change accordingly.
+4. **BasicInfo.RDS**: Document basic information including the population bar, last updated date, etc for reference. 
+
+
+```{r}
+
+#Download the dataset
+df <- read_csv(file = 'https://covid.ourworldindata.org/data/owid-covid-data.csv')
+
+#Record the time when the data was downloaded
+Now=Sys.time()
+
+#Save this time for use as subtitle in graphs
+Subtitle=glue::glue("Last Updated {Now}")
+
+#Safe all basic information about the dataset in one place for future use and reference
+BasicInfo<-tibble(LastUpdate=format(Sys.Date(),"%d %b, %Y"), #Document the updated date 
+                  ncol=ncol(df)) #Document the number of variables in the original dataset
+
+
+
+#Adjust variable type and filter out collectives (world,continents) in location
+all <-df %>% 
+    mutate(Continent=as.factor(continent),
+           Date=as.Date(date)) %>%
+    filter(!location %in% c("World","International"),
+           !location %in% c("Asia","Africa","Europe","North America","Oceania","South America")
+           ) %>%
+    rename(Population=population,
+           GDP_per_capita=gdp_per_capita,
+           VaccinatedP100=people_vaccinated_per_hundred,
+           VaccinationP100=total_vaccinations_per_hundred,
+           Entity=location) %>%  
+    mutate(Entity=recode(Entity,
+                        "United States" = "USA", 
+                        "United Kingdom" = "UK",
+                        "United Arab Emirates" = "UAE")) %>% 
+   ## Excluding outlier 1 
+    filter(!(Entity == "France" & Date == "2021-05-20")) %>% 
+   ## Excluding outlier 2
+    filter(!(Entity=="Peru" & Date == "2021-06-02"))
+
+
+
+#Doses Bar: The effect of the vaccine is modeled after vaccine rate reaches this number. Please see the full report or dashboard for discussion on this.
+BasicInfo$DoseBar=20
+
+#Population Bar: Only entities with population larger than this number are included in the analysis. Adjust the number here and data files generated will update accordingly.
+BasicInfo$PopulationBar=100000
+
+#Summary of entities above and below the population bar
+Entity <- all %>% 
+  filter(!is.na(Population)) %>% 
+  mutate(Included=if_else(Population>BasicInfo$PopulationBar, "YES","NO")) %>%
+  select(Entity,Included,Continent) %>% 
+  unique() %>% 
+  group_by(Continent,Included) %>% 
+  tally()
+
+#Save the list of included and excluded entities for future reference
+saveRDS(Entity,"Data/Entity.RDS")
+
+
+#Proceed with entities above the PopulationBar
+all <- all %>% 
+  filter(Population>BasicInfo$PopulationBar)
+
+```
+
+There are `r ncol(df)` variables in the data, which can be roughly divided into following seven categories.
+
+1. **Identity**
+    * Location (Entity)
+    * Date
+    * Continent
+    * iso_code
+2. **Vaccines**
+    * Total vaccinations: Total vaccine doses given. (original & per hundred)
+    * People vaccinated: Number of people who have received at least one dose (original & per hundred)
+    * People fully vaccinated: Number of people who have received two doses (original & per hundred)
+    * New vaccinations (original, smoothed, smoothed per million)
+3. **Cases**
+    * New & total cases (original & smoothed)
+    * New & total cases per million (original & smoothed)
+4. **Deaths**
+    * New & total deaths (original & smoothed)
+    * New & total deaths (original & smoothed)
+5. **Tests**
+    * New & total test (original & smoothed)
+    * New & total test per million (original & smoothed)
+    * Test positive rate (& test per case)
+    * Tests unit (people or samples tested)
+6. **Other Key Indicators of COVID-19**
+    * Reproduction rate
+    * ICU_patients (original & per million; daily & weekly)
+    * Hospitalized_patients (original & per million; daily & weekly)
+7. **Demographics and Other Control Variables**
+    * Population & population density
+    * Median age; proportion of population >=65 & >=70; life expectancy
+    * GDP per capita; proportion under extreme poverty
+    * Stingency index
+    * Cadiovasc death rate
+    * Diabetes prevalence
+    * Female & male smokers
+    * Hand-washing facilities
+    * Hospital beds per thousand
+    * Human development index
+  
+Some of the observations in the data are of collective entities, such as of each continent and of the whole world, which were dropped. Entities with population equal to or less than `r BasicInfo$PopulationBar` were also excluded. Afterwards, the dataset contains **`r comma(nrow(all))`** observations till **`r Now`**.
+
+# Data Problems Discussed 
+
+Although the data is in a tidy format, still two issues need to be addressed before the analysis. 
+
+1. **The fluctuations of daily case/death numbers**: The number of new cases for an entity understandably change daily. But some of these variations are due to adjustment/correction, such as drop of repeatedly counted cases or addition of past cases missed; and some due to particular dates, such as more people get tested during weekends than weekdays. It is therefore helpful to provide **a moving average** (e.g., a centered 7-day moving average is the average of +/- 3 days), so that the daily case numbers can bear a more reliable representation of the Covid-19 situation in each entity. This can be done easily in R, please see 2.4.4
+
+2. **The vaccine numbers**: There are a large amount of missing values for the key variable in this project: the vaccine data. Followed please see a plot showing missing in a) **people vaccinated** (VaccinatedP100) and in b) **total number of vaccination doses** (VaccinationP100) given during the last 5 days.
+
+
+```{r}
+#Check missings on main variables for the last 5 days
+vac_miss<-all %>% 
+  select(VaccinatedP100,VaccinationP100,
+         NewCasesPMillion=new_cases_per_million,
+         NewDeathsPMillion=new_deaths_per_million,
+         Date,Entity) %>% 
+  filter(between(Date,
+                 (max(Date)-5),
+                 #give one day grace period, so we don't overestimate missing
+                 (max(Date)-1))) %>% 
+  complete(Date,Entity)
+
+#Change column sequence so variable names and missing proportion can show completely in vis_miss graph
+vac_miss<-vac_miss[, c(2,3,4,5,6,1)]
+#Visualization of missing in the past 5 days
+vac_miss%>% 
+  vis_miss() 
+
+```
+
+Vaccine data is more complete in terms of **Total Vaccines Doses** than in **People Vaccinated**. Therefore, the former will be used in this analysis. 
+
+In the following sections, I will first discuss the strategies that can be used to work with these missing values, then implement the strategies chosen.  
+
+# Possible Strategies
+## Handeling of missing values: For entities with no vaccine data at all
+
+If an entity has no vaccine data at all till the date of this report, it is likely that vaccine rollout has not started there. The missing values will therefore be replaced by 0. (Please see section 4.1 for a brief description of these entities, and Appendix 1 for a more detailed discussion and analysis)
+
+## Handling of missing values: For entities with some vaccine data
+
+These entities have started their vaccine rollout, but did not update the numbers daily. Therefore, the gaps between known numbers need to be filled. The following two steps will be taken to impute these values
+
+1. **Missing *before* vaccine rollout**: For each entity, identify the first day with reported vaccine numbers. Any observations before the first date of reported vaccine number will be droped.  
+2. **Missing *after* vaccine rollout**: To fill in the gaps between reported vaccine numbers, at least **three possible strategies** can be used:
+
+   * To impute missing values by bringing **the last available data forward**: For entities that update their vaccine numbers sparingly, this imputation method could result in serious under-evaluation of the actual numbers. For example, we could impute today's vaccine number with the number from a week ago.
+   
+   * To impute missing values with **moving average**: This strategy can combine the information from before and after a specific date if a *centered* average is used. But the result could be biased toward the end where more values are available.
+   
+   * To impute missing with an algorithm that could a) address the trend of the increasing total vaccine numbers in between the gaps and b) turn in reasonably accurate results even when the gaps are relatively large. After much research and considerations, I have decided to use the `na_interpolation` function in the [**imputeTS** package](https://mran.microsoft.com/snapshot/2017-12-11/web/packages/imputeTS/vignettes/imputeTS-Time-Series-Missing-Value-Imputation-in-R.pdf) for this purpose. Its performance is demonstrated in section 2.4.3. For more visualizations discussing how well the algorithm works, please see Appendix 2.
+
+
+# Implement the Strategy Chosen 
+
+## Entities with no vaccination data to date 
+
+```{r}
+#Find entities with no vaccination data till today
+NoVaccine<-all %>% 
+  group_by(Entity) %>% 
+  summarize(VacValues=sum(!is.na(VaccinationP100))) %>% 
+  arrange(VacValues) %>% 
+  filter(VacValues==0) 
+
+#For these entities, replace all Vaccination values with 0
+NoVaccineImputed <- all %>% 
+  filter(Entity %in% NoVaccine$Entity) %>% 
+  mutate(VaccinationP100 = replace_na(VaccinationP100,0))
+
+#Replacing the observations in the dataset and rename the dataset Vac
+Vac <- all %>% 
+  filter(!Entity %in% NoVaccine$Entity) %>% 
+  rbind(NoVaccineImputed)
+
+```
+
+Till the date of this report (i.e., `r Sys.Date()`), there are **`r nrow(NoVaccine)` entities in the data that has no vaccine numbers** reported at all. It is conceivable to infer that vaccine rollout hasn't started in these entities. Their vaccine numbers are all replaced with 0. Analysis was conducted to see whether these entities were less motivated (i.e., has less cases) or lack resources (i.e., has lower GDP per capita) to administer Covid-19 vaccines. Please see **Appendix 1** for details.  
+
+## Drop missings before the 1st day of vaccine rollout 
+
+The starting date of vaccine rollout differs from entities to entities. In the following table, please see the entities ranked by their Vaccine Start Date. 
+
+```{r}
+#Identity all entities that have started vaccination, then get their Day1 of vaccine rollout
+Vac_Day<-Vac %>% 
+  group_by(Entity) %>% 
+  filter(VaccinationP100>0) %>% 
+  mutate(VacDay=1+Date-min(Date)) %>% 
+  ungroup()
+
+#Put all the Day1 in a table for review
+Starter <- Vac_Day %>% 
+  filter(VacDay==1) %>% 
+  select(Entity,Date) %>% 
+  arrange(Date) %>% 
+  rename(`Vaccine Start Date`=Date) 
+#Create the searchable, sortable table for review
+datatable(Starter, options = list(
+  searching = TRUE,
+  columnDefs = list(list(className = 'dt-center',targets=1:2)),
+               pageLength = 10)
+)
+```
+
+For each entity, only observations from the 1st day of known vaccine values were included in the analysis. 
+
+
+```{r}
+#Only work on data after the first date of Vaccine rollout worldwide
+Vac <- Vac %>% 
+  filter(Date>=min(Vac_Day$Date))
+
+#Start Date of Each Entity
+Vac_Zero <- Vac_Day %>% 
+  filter(VacDay==1) %>% 
+  select(Entity,Date) %>% 
+  mutate(VaccineStartDate=Date) %>% 
+  select(Entity,VaccineStartDate)
+
+#For each entity, on select observations since Day1 of vaccine rollout
+Vac <-Vac %>% 
+  #Only work with data after the first date of Vaccine rollout worldwide
+  filter(Date>=min(Vac_Day$Date)) %>% 
+  #make sure each entity has complete dates
+  complete(Entity,Date) %>%
+  left_join(Vac_Zero) %>% 
+  group_by(Entity) %>% 
+  #choose observations from Day1 of vaccine rollout
+  filter(Date>=VaccineStartDate) %>% 
+  ############mutate(VaccinationP100=if_else(Date<VaccineStartDate,0,VaccinationP100)) %>% Delete Later??
+  ungroup() 
+
+```
+
+## Impute missings between the 1st and last day of known vaccine numbers 
+
+As said, the **na_interpolation** method will be used to fill in the gap between known vaccine numbers. One of the biggest concern for missing vaccine numbers in this data is the large proportion of missing for some entities. Followed please see the imputed values among **five entities with the most missing values** to the date of this report. Please note that the imputation always ends at the last known vaccine number for each entity, which may be one single dot at the end of the line and is therefore hard to see. (For more discussions on the imputation methods and check imputed values side by side with the original values for all entities, please see Appendix 2)
+
+```{r fig.width=12, fig.height=12}
+#####!!!!!!!Do not change Vac file from this point on, because it is used in Appendix 2!!!!!!!
+#####in the appendix, Vac is used to show what happens when imputation is used beyond the last known values######
+
+#Identify the last day of known vaccine values for each entity
+Vac_Max<-Vac %>% 
+  filter(VaccinationP100>0) %>% 
+  group_by(Entity) %>% 
+  summarize(VaccinationMax=max(VaccinationP100,na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  select(Entity,VaccinationMax) %>% 
+##Identity the Last Day of Vaccine number for each entity 
+left_join(Vac,by=c("Entity","VaccinationMax"="VaccinationP100")) %>% 
+select(VacLastDate=Date,
+       Entity)
+
+#Imputation in action!
+Vac_Impute<-Vac %>% 
+  select(Date,Entity,VaccinationP100) %>% 
+  left_join(Vac_Max) %>% 
+  group_by(Entity) %>% 
+  #Use the Date not the Vaccination# in filter, otherwise all gap dates will be gone.
+  filter(Date<=VacLastDate) %>%  
+  na_interpolation(option="linear") %>% 
+  left_join(Vac,by=c("Entity","Date")) %>% 
+  rename(VacImputed=VaccinationP100.x
+         , VacKnown=VaccinationP100.y) %>% 
+  ungroup()
+
+#To check how imputation works:
+##Identify five entities with the most missing values from 1st to last date of known vaccine numbers
+MissingMost<-Vac_Impute %>% 
+  group_by(Entity) %>% 
+  summarize(Missings=sum(is.na(VacKnown))) %>% 
+  arrange(-Missings) %>% 
+  slice_head(n=5)
+
+#Make a plot to examine the performance of the imputation algorithm 
+Vac_Impute %>% 
+  select(Entity,Date,VacImputed,VacKnown) %>% 
+  pivot_longer(col=c("VacImputed","VacKnown"),
+               names_to="Value Type",values_to="Vaccination",
+               names_prefix="Vac") %>% 
+  filter(Entity %in% MissingMost$Entity) %>% 
+  ggplot(aes(x=Date,y=Vaccination,color=`Value Type`))+
+    geom_line() +
+    theme_minimal()+
+    facet_wrap(~Entity,scales="free",nrow=5)+
+  labs(title="Check How Imputation of Vaccine Numbers Worked"
+       #,title="Check How Imputation of Vaccine Numbers Worked for Entity: Sweden"
+       #,subtitle="(missings values imputed with the interpolation algorithm)"
+       ,subtitle="Showing 5 entities with the most missing values from the 1st to last day of known vaccine numbers"
+       ,x="", y="Total Vaccine Doses Given Per 100 People")
+
+ggsave(filename="Graphs/Most imputation.PNG",
+       width=9,height=5.06,dpi=300,limitsize=FALSE)
+
+```
+
+## Smooth fluctuations in cases and deaths 
+
+As discussed in 2.2, a **centered 7-day moving average** (i.e., average of +/- 3 days) are calculated to smooth out the fluctuations in new cases per capita and new deaths per capita.  
+
+```{r}
+#Note: While new cases/deaths need to be smoothed (people continuously infected/deceased but reporting fluctuate); fluctuations in reported vaccine numbers could be a reflection of what's actually going on? Vaccine rollout, for example, could speed up or slow down with imported supply? 
+
+
+##Selection of relevant variables
+Vac_Final <-Vac_Impute %>%
+  select(Date,Entity,Continent,VacImputed
+         #Known numbers of VaccinationP100
+         ,VacKnown
+         #Cases & Spread
+         ,new_cases_per_million
+         ,new_cases
+         ,total_cases
+         ,reproduction_rate
+         #Deaths & severity of symptoms)
+         ,new_deaths_per_million
+         ,new_deaths
+         ,total_deaths
+         ,icu_patients_per_million
+         ,hosp_patients_per_million
+         #Tests
+         ,total_tests_per_thousand
+         ,positive_rate
+         ,new_tests_smoothed_per_thousand
+         #Control Variables
+         ,iso_code
+         ,GDP_per_capita
+         ,Population
+         ,population_density
+         ,median_age
+         ,aged_65_older
+         ,aged_70_older
+         ,life_expectancy
+         ,diabetes_prevalence
+         ,cardiovasc_death_rate
+         ,female_smokers
+         ,male_smokers
+         ,handwashing_facilities
+         ,hospital_beds_per_thousand
+          ) 
+
+##Smoothing of relevant variables
+Vac_Final<-Vac_Final %>% 
+  arrange(Entity) %>% 
+  group_by(Entity) %>% 
+  #use rollapply instead of rollmean to handle missing
+  mutate(NewCases7D=rollapply(new_cases_per_million,width=7,mean,na.rm=TRUE,partial=TRUE)
+         ,ReproductionRate7D=rollapply(reproduction_rate,width=7,mean,na.rm=TRUE,partial=TRUE)
+         ,NewDeaths7D=rollapply(new_deaths_per_million,width=7,mean,na.rm=TRUE,partial=TRUE)) %>%
+  ungroup()
+
+#Are there entities with case and death number to be NA to date?
+No_Cases<-Vac_Final %>% 
+  group_by(Entity) %>% 
+  summarize(Values=sum(!is.na(NewCases7D))) %>% 
+  arrange(Values) %>% 
+  filter(Values==0) %>% 
+  select(Entity)
+
+
+#Are there entities with case and death number to be NA to date?
+No_Deaths<-Vac_Final %>% 
+  group_by(Entity) %>% 
+  summarize(Values=sum(!is.na(NewDeaths7D))) %>% 
+  arrange(Values) %>% 
+  filter(Values==0) %>% 
+  select(Entity)
+
+
+```
+
+As to the date of this report, there are `r nrow(No_Cases)` entities with no case values and `r nrow(No_Deaths)` entities with no death values for all dates since its 1st day of vaccine rollout till the last day with available vaccine numbers. These missing values are replaced with 0 (see also 4.1 for handling of vaccine numbers in the similar situation). 
+
+# Overview of the Data Prepared for Modeling
+## Main Variables
+
+After all the imputations, the missing of main variables in the project are as follows.
+
+```{r}
+#The case numbers of these entities replaced by 0
+Vac_Final<-Vac_Final %>% 
+  group_by(Entity) %>% 
+  mutate(NewCases7D=if_else(Entity %in% No_Cases$Entity,
+                            0,
+                            NewCases7D),
+         NewDeaths7D=if_else(Entity %in% No_Deaths$Entity,
+                             0,
+                             NewDeaths7D)) %>% 
+  ungroup()
+
+##Check missings in the final data
+Vac_Final %>% 
+  select(Entity,Date,VacImputed,NewCases7D,NewDeaths7D) %>% 
+  vis_miss()
+
+```
+
+## Other Relevant Variables
+
+Some other variables are also potentially relevant in this report. Please see followed. 
+
+
+```{r}
+Vac_Final %>% 
+  select(ReproductionRate7D,total_tests_per_thousand,icu_patients_per_million,hosp_patients_per_million,Population) %>% 
+  vis_miss()
+
+```
+
+```{r}
+#save all prepared variable for other applications to analyze too, csv format
+write_csv(Vac_Final,"Data/VacccineAllVariables.csv")
+
+#Save variables needed for Shiny Dashboard, .RDS format to boost performance
+shiny<-Vac_Final %>% 
+  select(Date, Entity, Continent, Population, VacImputed, VacKnown, NewCases7D, NewDeaths7D,
+         NewCasesRaw=new_cases_per_million,
+         NewDeathsRaw=new_deaths_per_million)
+saveRDS(shiny,"Data/Vaccine.RDS")
+
+#Save BasicInfo dataset (Updated Time, Doses and Population threshold)
+saveRDS(BasicInfo,"Data/BasicInfo.RDS")
+
+```
+
+
+* **Test** numbers will not be included in the model because 1) there are too many missing values and 2) the missing is likely to be *systematic* rather than *random*, in that entities with less resources are more likely to be missing on these numbers. 
+
+* **Reproduction Rate** is not as complete as **Daily New Cases** (after imputation), but can still be used for reference. In the regression model estimating the effect of **Vaccination** on the **Spread** of Covid-19, **Daily New Cases** will be used as the dependent measure. 
+
+* **ICU Patients** and **Hospitalized Patients** are potentially helpful indicators for severity of symptoms. However, we lack data on these two variables. Therefore, **Deaths** will be adopted as the dependent measure in the model estimating the impact of **Vaccination** on **severity of symptoms**. 
+
+* **Population** info is relatively adequate. This variable will be used in some of the visualizations.
+
+Other relevant variables that do not vary within each entity, such as GDP, median age, population density, will not be included in the analysis because in this analysis, I will use the **many models** method to estimate the effect of Vaccination. Specifically, the same regression model will be estimated among each and every entity, with the results then summarized in the report.
+
+
+
+# Appendix
+## Appendix 1: Explore Entities with No Vaccine Numbers to Date 
+
+At least two possible factors may contribute to the complete absence of vaccine data in these entities:
+
+1. **Necessity**: Compare to entities with fewer cases, entities with more cases are more likely to be motivated to administer vaccine rollout and to report the progress closely. 
+
+2. **Ability**: An entity needs to have enough resources in order to administer vaccine rollout and record relevant data.
+
+### The Necessity Hypothesis: Vaccine and Total Cases 
+
+We have identified entities that have no vaccine numbers at all to date. Let's look at their case numbers to check out the necessity hypothesis. Because entities differ in how frequently vaccine data is updated, compassion within the last five days were shown to help us get a more comprehensive picture. 
+
+
+```{r}
+library(ggpubr)
+
+all %>% 
+  #Choose a specific day for comparison
+  filter(Date>=(max(Date)-5),
+         Date<=(max(Date)-1)) %>% 
+  mutate(VaccineData=if_else(Entity %in% NoVaccine$Entity, "None","Some")) %>% 
+  ggplot(aes(x=VaccineData,y=total_cases_per_million,color=VaccineData))+
+  geom_boxplot(outlier.alpha=0)+
+  geom_jitter(alpha=0.5,
+              width=0.5,
+              height=0.1)+
+  facet_wrap(~Date,nrow=2)+
+  scale_color_brewer("Vaccine Data",
+                     #,labels=c("Available","Missing")
+                     palette="Dark2")+
+  stat_compare_means(method = "t.test", vjust=1,
+                     label = "p.signif"
+                     #not sure why this didn't work: check later
+                     #symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05,0.01, 1), symbols = c("p<0.0001", "p<0.001", "p<0.01", "p<0.05","p<0.1", "ns"))
+                     )+
+  theme_minimal()+
+  scale_y_continuous(labels=label_number_si(accuracy=1))+
+  labs(title="Total Cases Per Million & Missing of Vaccine Data",
+       subtitle=Subtitle,
+       x=" ",
+       y=" ",
+       caption="*Showing significance level of Welch's two sample t-test")+
+  theme(axis.text.x=element_blank(),
+        plot.subtitle=element_text(hjust=1,color="grey50"))
+
+```
+
+Consistent with the above discussion, entities with no vaccine data have much less confirmed cases per capita. This result, however, may need to be viewed in terms of these entities' ability to perform tests to identify cases if there are any, which then bring us to the next section.
+
+### The Ability Hypothesis: Vaccines and GDP
+
+Also consistent with the above discussion, entities with no vaccine data have lower GDP per capita. It is possible that lack of resources may also contribute to fewer tests, hence the lower case numbers. 
+
+```{r}
+#GDP and Missing on Vaccine
+all %>% 
+  #Choose a specific day for comparison
+  filter(Date>=(max(Date)-5),
+         Date<=(max(Date)-1)) %>% 
+  mutate(VaccineData=if_else(Entity %in% NoVaccine$Entity, "None","Some")) %>% 
+  ggplot(aes(x=VaccineData,y=GDP_per_capita,color=VaccineData))+
+  geom_boxplot(outlier.alpha=0)+
+  geom_jitter(alpha=0.5,
+              width=0.5,
+              height=0.1)+
+  facet_wrap(~Date,nrow=2)+
+  scale_color_brewer("Vaccine Data",
+                     palette="Dark2")+
+  stat_compare_means(method = "t.test",vjust=1,
+                     #show significance level
+                     aes(label = ..p.signif..))+
+  theme_minimal()+
+  scale_y_continuous(labels=label_number_si(accuracy=1))+
+  labs(title="GDP Per Capita & Missing of Vaccine Data",
+       subtitle=Subtitle,
+       x=" ",
+       y=" ",
+       caption="*Showing significance level of Welch's two sample t-test")+
+  theme(axis.text.x=element_blank(),
+        plot.subtitle=element_text(hjust=1,color="grey50"))
+
+```
+
+### Location of the Entities
+
+Finally, we can also locate these entities on the map. One may even infer the actual Covid-19 situations in these entities by looking at their neighbors. (Tempting as it is to continue with this line of analysis, I'd better leave it here as the assignment will be due in 2 days and I have only finished its section 2 about preparing the data :P)  
+
+```{r}
+library(rworldmap)
+
+Vac_Drop_Review <- all %>% 
+  mutate(VaccineData=if_else(Entity %in% NoVaccine$Entity, "None","Some")) %>% 
+  #choose key variables for comparison
+  select(VaccineData,Entity,iso_code)
+
+joinData <- joinCountryData2Map( Vac_Drop_Review,
+                                 joinCode = "ISO3",
+                                 nameJoinColumn = "iso_code")
+
+#highlight entities dropped
+
+mapParams <- mapCountryData( joinData
+                                  , mapTitle="Locations of Entities with None versus Some Vaccine Data"
+                                  , nameColumnToPlot="VaccineData"
+                                  , addLegend=TRUE
+                                  , missingCountryCol="white"
+                                  , oceanCol="lightblue")
+```
+
+
+## Appendix 2. Discussions on the Imputation Methods 
+
+As discussed above, the imputation method used in this project was **na_interpolation** in the **imputeTS** package. The following graph shows that although the gaps between known vaccine numbers were filled in smoothly, the values for a few days after the last known value dropped dramatically. This is understandable because na_interpolation is an imputation rather than a forecasting method. Therefore, the imputation of missing values in this analysis was done only between the 1st and last day of known vaccine numbers for each entity.
+
+```{r}
+Vac_impute <-Vac %>% 
+  select(Date,Entity,VaccinationP100) %>% 
+  group_by(Entity) %>% 
+  na_interpolation(option="linear") %>% 
+  left_join(Vac,by=c("Date","Entity")) %>% 
+  rename(Imputed=VaccinationP100.x
+         , Original=VaccinationP100.y) 
+
+
+p1=Vac_impute %>% 
+  pivot_longer(col=c("Imputed","Original"),names_to="ValueType",values_to="Vaccination") %>% 
+  filter(Entity=="Luxembourg") %>% 
+  ggplot(aes(x=Date,y=Vaccination,color=ValueType))+
+  geom_line()+
+  labs(subtitle="Luxembourg: Many small gaps",
+       x="",
+       y="")
+p2=Vac_impute %>% 
+  pivot_longer(col=c("Imputed","Original"),names_to="ValueType",values_to="Vaccination") %>% 
+  filter(Entity=="Albania") %>% 
+  ggplot(aes(x=Date,y=Vaccination,color=ValueType))+
+  geom_line()+
+  labs(subtitle="Albania: Large and small gaps",
+       x="",
+       y="")
+gridExtra::grid.arrange(p1,p2
+                        ,nrow=2
+                        ,top = textGrob("Interpolation imputation works well to fill in the gaps, not suitable for forecasting",
+                                                    gp = gpar(fontsize = 12, font = 2)))
+
+
+```
+
+Also maybe of interests is the comparison between different imputation methods. Followed please see a comparison between na_ma and na_interpolation. Results from the latter can be much smoother and likely closer to how vaccine numbers would increase gradually in an entity. 
+
+```{r}
+##the performance of imputation algorithms differ based on data available. To demonstrate the "dip" in na_ma as compared to na_interpolation, choose a specific subset of data where it shows.
+#imputation with ma (moving average)
+Vac_impute_ma <-Vac %>% 
+  filter(Date<="2021-05-08") %>% 
+  select(Date,Entity,VaccinationP100) %>% 
+  group_by(Entity) %>% 
+  na_ma(k=7,weighting="linear") %>% 
+  left_join(Vac,by=c("Date","Entity")) %>% 
+  rename(Imputed=VaccinationP100.x
+         , Original=VaccinationP100.y) 
+
+#Choose an entity for demonstration
+#Graph 1: Performance of ma imputation
+p3=Vac_impute_ma %>% 
+  pivot_longer(col=c("Imputed","Original"),names_to="ValueType",values_to="Vaccination") %>% 
+  filter(Entity=="Luxembourg") %>% 
+  ggplot(aes(x=Date,y=Vaccination,color=ValueType))+
+  geom_line()+
+  labs(subtitle="na_ma (weighting=linear)",
+       x="",
+       y="")
+#Graph 2: Performance of interpolation imputation
+p4=Vac_impute %>% 
+  filter(Date<="2021-05-08") %>% 
+  pivot_longer(col=c("Imputed","Original"),names_to="ValueType",values_to="Vaccination") %>% 
+  filter(Entity=="Luxembourg") %>% 
+  ggplot(aes(x=Date,y=Vaccination,color=ValueType))+
+  geom_line()+
+  labs(subtitle="na_interpolation (option=linear)",
+       x="",
+       y="")
+
+gridExtra::grid.arrange(p3,p4
+                        ,nrow=2
+                        ,top = textGrob("Comparing the ma(moving average) and interpolation imputation",
+                                                    gp = gpar(fontsize = 12, font = 2))
+                        )
+
+```
+
+The above graph is based on data of Luxembourg. In the following data, you can check and compare the performance of these two imputation methods for data of all entities of interests. 
+
+```{r}
+
+CheckImputation<-Vac_impute %>% 
+  select(Entity,Date,Original,InterpolationImputed=Imputed) %>% 
+  left_join(Vac_impute_ma) %>% 
+  select(Entity,Date,Original,InterpolationImputed,MaImputed=Imputed)
+
+datatable(CheckImputation)
+  
+
+```
+
+## Appendix 3. Missing on Potential Control Variables
+
+```{r}
+Vac_Final %>% 
+  select(aged_65_older,aged_70_older,median_age,diabetes_prevalence,cardiovasc_death_rate,hospital_beds_per_thousand,handwashing_facilities,population_density) %>% 
+  vis_miss()
+```
+
