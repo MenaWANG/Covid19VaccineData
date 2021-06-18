@@ -1,6 +1,6 @@
 ---
 title: "Data Preparation for Modelling"
-author: "[Mena WANG](https://menawang.github.io/online-cv/)"
+author: "Mena WANG"
 date: "`r Sys.Date()`"
 output:
   html_document:
