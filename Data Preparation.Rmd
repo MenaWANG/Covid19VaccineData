@@ -46,7 +46,7 @@ The purpose of this report is **to investigate the effects of vaccines on two ke
 
 The analysis was done using the **many-models approach**, where the same model was estimated among each and every entity with data then summarized to gain a comprehensive picture of vaccine effectiveness worldwide. 
 
-**The full report is too big for GitHub to host, you can find it [here](https://rpubs.com/MenaWANG/COVID19Vaccines), or explore it through this [interactive dashboard](https://rstudioconnect-online.monash.edu/connect/#/apps/287/access).** Followed is the code used to prepare data for the many-models analysis. You can also download the prepared data from the **Data** folder. 
+**The full report is too big for GitHub to host, you can find it [here](https://rpubs.com/MenaWANG/COVID19Vaccines), or explore it through this [interactive dashboard](https://rstudioconnect-online.monash.edu/connect/#/apps/287/access).** Followed is the code used to prepare data for the many-models analysis. You can also download the prepared data from the [Data Folder](https://github.com/MenaWANG/Covid19VaccineData).
 
 Have fun wrangling and analyzing the data! Comments and suggestions highly appreciated, thanks!
 
@@ -55,10 +55,10 @@ Have fun wrangling and analyzing the data! Comments and suggestions highly appre
 
 One of the best COVID-19 datasets is the daily-updated Covid-19 dataset offered by [Our World in Data](https://ourworldindata.org/coronavirus). Still, some wrangling needs to be done before the data will be ready for modeling. 
 
-For those interested in the wrangling process, please read ahead; for those who simply want to use the prepared the data, here is a list of data you can find in the **Data Folder** 
+For those interested in the wrangling process, please read ahead; for those who simply want to use the prepared the data, here is a list of data you can find in the **[Data Folder](https://github.com/MenaWANG/Covid19VaccineData)**: 
 
 1. **VacccineAllVariables.csv**: Dataset with imputed vaccine numbers, smoothed case and deaths numbers, and a comprehensive list of other relevant variables.
-2. **Vaccine.RDS**: Dataset with only the key variables in RDS format, used in deploying [this Dashboard]((https://rstudioconnect-online.monash.edu/connect/#/apps/287/access)) to boost performance.
+2. **Vaccine.RDS**: Dataset with only the key variables in RDS format, used in deploying [this Dashboard](https://rstudioconnect-online.monash.edu/connect/#/apps/287/access) to boost performance.
 3. **Entity.RDS**: List of all entities in the original dataset, categorized as included vs not-included in the analysis depending on its population. The population threshold is now set as 100K (i.e., only entities with population larger than 100K are included), you can adjust the value in the following code chunk, the above two data files will change accordingly.
 4. **BasicInfo.RDS**: Document basic information including the population bar, last updated date, etc for reference. 
 
@@ -196,6 +196,9 @@ vac_miss<-vac_miss[, c(2,3,4,5,6,1)]
 #Visualization of missing in the past 5 days
 vac_miss%>% 
   vis_miss() 
+
+ggsave("Graphs/MissingBeforeImputation.PNG",width=9,height=5.06,dpi=300,limitsize=FALSE)
+
 
 ```
 
@@ -466,6 +469,8 @@ Vac_Final %>%
   select(Entity,Date,VacImputed,NewCases7D,NewDeaths7D) %>% 
   vis_miss()
 
+ggsave("Graphs/MissingsImputation.PNG",height=5.06,width=9,dpi=300,limitsize=FALSE)
+
 ```
 
 ## Other Relevant Variables
@@ -555,6 +560,8 @@ all %>%
   theme(axis.text.x=element_blank(),
         plot.subtitle=element_text(hjust=1,color="grey50"))
 
+ggsave("Graphs/Cases in entities with no vaccine data.PNG",height=5.06,width=9,dpi=300,limitsize=FALSE)
+
 ```
 
 Consistent with the above discussion, entities with no vaccine data have much less confirmed cases per capita. This result, however, may need to be viewed in terms of these entities' ability to perform tests to identify cases if there are any, which then bring us to the next section.
@@ -591,6 +598,8 @@ all %>%
   theme(axis.text.x=element_blank(),
         plot.subtitle=element_text(hjust=1,color="grey50"))
 
+ggsave("Graphs/GDP of entities with no vaccine data.PNG",height=5.06,width=9,dpi=300,limitsize=FALSE)
+
 ```
 
 ### Location of the Entities
@@ -617,6 +626,8 @@ mapParams <- mapCountryData( joinData
                                   , addLegend=TRUE
                                   , missingCountryCol="white"
                                   , oceanCol="lightblue")
+
+
 ```
 
 
